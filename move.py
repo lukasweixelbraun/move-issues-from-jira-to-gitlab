@@ -207,13 +207,19 @@ def sync_comments_and_attachments(issue_id, gl_issue):
     for comment in issue_info['fields']['comment']['comments']:
         author = comment['author']['name']
 
+        # edit body
+        body = comment['body']
+        if body == None: body = ""
+        body = replace_hashtag(body)
+        body = replace_issue_link(body)
+
         # add comment/note
         note_add = requests.post(
             GITLAB_URL + 'api/v4/projects/%s/issues/%s/notes' % (GITLAB_PROJECT_ID, gl_issue),
             headers={'PRIVATE-TOKEN': GITLAB_TOKEN,'SUDO': GITLAB_USER_NAMES.get(author, author)},
             verify=VERIFY_SSL_CERTIFICATE,
             data={
-                'body': comment['body'],
+                'body': body,
                 'created_at': comment['created']
             }
         )
@@ -286,6 +292,12 @@ def set_updated_at(gl_issue, updated_at, created_at):
         }
     ).json()
 
+def replace_hashtag(text):
+    return text.replace("#", "\# ")
+
+def replace_issue_link(text):
+    return text.replace(JIRA_PROJECT + "-", "#")
+
 def create_issue(ticket_number, issue):
     reporter = issue['fields']['reporter']['name']
 
@@ -303,6 +315,12 @@ def create_issue(ticket_number, issue):
     for label in issue['fields']['labels']:
         labels += "," + label
 
+    # edit description
+    description = issue['fields']['description']
+    if description == None: description = ""
+    description = replace_hashtag(description)
+    description = replace_issue_link(description)
+
     # create gitlab issue
     response = requests.post(
         GITLAB_URL + 'api/v4/projects/%s/issues' % GITLAB_PROJECT_ID,
@@ -311,7 +329,7 @@ def create_issue(ticket_number, issue):
         data={
             'iid': ticket_number,
             'title': issue['fields']['summary'],
-            'description': issue['fields']['description'],
+            'description': description,
             'created_at': issue['fields']['created'],
             'assignee_id': assignee_id,
             'milestone_id': last_milestone_id,
@@ -334,7 +352,14 @@ def create_issue(ticket_number, issue):
 
     return gl_issue
 
+# STEP 1: create ALL issues
+# STEP 2: create ALL comments
+# STEP 3: update 'updated_at' for ALL issues
+# this order is necessary to garantee, that all issue links (for example #145) are working
+# and that 'last updated' is set correctly
 def sync_issues():
+    issues = []
+
     for ticket_number in range(1, MAX_JIRA_TICKET_NUMBER + 1):
         jira_key = JIRA_PROJECT + "-" + str(ticket_number)
         
@@ -349,16 +374,26 @@ def sync_issues():
 
         # create issue
         gl_issue = create_issue(ticket_number, issue)
-
         if gl_issue <= 0:
             continue
 
+        # add issue
+        issue['new_iid'] = gl_issue
+        issues.append(issue)
         print ("created issue #%s" % gl_issue)
-        
-        # update issue
+
+    # sync all issues
+    for issue in issues:
+        gl_issue = issue['new_iid']
         sync_comments_and_attachments(issue['id'], gl_issue)
         set_updated_at(gl_issue, issue['fields']['updated'], issue['fields']['created'])
-        print ("updated issue #%s" % gl_issue)
+        print ("comments for issue #%s" % gl_issue)
+
+    # update all updated_at for issues
+    for issue in issues:
+        gl_issue = issue['new_iid']
+        set_updated_at(gl_issue, issue['fields']['updated'], issue['fields']['created'])
+        print ("updated 'updated_at' for issue #%s" % gl_issue)
 
 fetch_project_data()
 users = fetch_users()
