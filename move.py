@@ -120,6 +120,8 @@ def get_assignee_id(assignee):
             if user['username'] == GITLAB_USER_NAMES.get(assignee_name, assignee_name):
                 assignee_id = user['id']
                 break
+                
+    return assignee_id
 
 def sync_sprints(issue):
     # get sprints
