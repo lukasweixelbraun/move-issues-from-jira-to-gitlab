@@ -369,7 +369,7 @@ def sync_issues():
         issue_response = fetch_issue_data(jira_key)
 
         if issue_response.status_code == 404:
-            print('Issue FUN-%s not found! Skipping issue id.' % ticket_number)
+            print('Issue %s-%s not found! Skipping issue id.' % (JIRA_PROJECT, ticket_number))
             continue
 
         issue = issue_response.json()
