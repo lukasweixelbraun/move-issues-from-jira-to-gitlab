@@ -67,7 +67,7 @@ def fetch_project_data():
             raise Exception("Unable to find %s in gitlab!" % GITLAB_PROJECT)
 
 # fetch jira sprints
-def fetch_sprints():
+def fetch_jira_sprints():
     sprints = requests.get(
         JIRA_URL + '/rest/agile/1.0/board/%s/sprint' % JIRA_BOARD_ID,
         auth=HTTPBasicAuth(*JIRA_ACCOUNT),
@@ -78,17 +78,30 @@ def fetch_sprints():
     return sprints
 
 # fetch gitlab users to add assignee
-def fetch_users():
-    users = requests.get(
+def fetch_gitlab_users():
+    gitlab_users = requests.get(
         GITLAB_URL + 'api/v4/users?per_page=100&page=1',
         headers={'PRIVATE-TOKEN': GITLAB_TOKEN},
         verify=VERIFY_SSL_CERTIFICATE,
     ).json()
 
-    return users
+    return gitlab_users
+
+def get_jira_users_for_projekt():
+    jira_users = []
+    for issue in jira_issues:
+        reporter = issue['fields']['reporter']['name']
+        assignee = issue['fields']['assignee']['name']
+
+        if (reporter in jira_users) == False:
+            jira_users.append(reporter)
+        if (assignee in jira_users) == False:
+            jira_users.append(assignee)
+
+    return jira_users
 
 # fetch jira milestones
-def fetch_milestones():
+def fetch_gitlab_milestones():
     milestones = requests.get(
         GITLAB_URL + 'api/v4/projects/%s/milestones' % GITLAB_PROJECT_ID,
         headers={'PRIVATE-TOKEN': GITLAB_TOKEN},
@@ -97,16 +110,38 @@ def fetch_milestones():
 
     return milestones
 
-def fetch_issue_data(jira_key):
+def fetch_jira_issues():
+    ticket_number = 1
+    max_results = 500
+    jira_issues = np.array([])
+
+    while(True):
+        new_issues = np.array(fetch_issue_data(ticket_number, max_results))
+        jira_issues = np.concatenate((jira_issues, new_issues))
+
+        ticket_number = ticket_number + max_results
+        if ticket_number > MAX_JIRA_TICKET_NUMBER:
+            break
+
+    data = jira_issues.tolist()
+    data.sort(key=get_ticket_number)
+
+    return data
+
+def get_ticket_number(jira_issue):
+    ticket_number = jira_issue["key"].removeprefix(JIRA_PROJECT + "-")
+    return int(ticket_number)
+
+def fetch_issue_data(from_jira_key, max_results):
     # fetch jira issue data with jiraKey
-    issue_response = requests.get(
-        JIRA_URL + '/rest/api/2/issue/%s' % jira_key,
+    issues_response = requests.get(
+        JIRA_URL + '/rest/api/2/search?jql=project=%s&startAt=%s&maxResults=%s' % (JIRA_PROJECT, from_jira_key, max_results) ,
         auth=HTTPBasicAuth(*JIRA_ACCOUNT),
         verify=VERIFY_SSL_CERTIFICATE,
         headers={'Content-Type': 'application/json'}
-    )
+    ).json()
 
-    return issue_response
+    return issues_response['issues']
 
 def get_assignee_id(assignee):
     # get assignee
@@ -116,11 +151,11 @@ def get_assignee_id(assignee):
 
     assignee_id = None
     if assignee_name != '':
-        for user in users:
+        for user in gitlab_users:
             if user['username'] == GITLAB_USER_NAMES.get(assignee_name, assignee_name):
                 assignee_id = user['id']
                 break
-                
+
     return assignee_id
 
 def sync_sprints(issue):
@@ -149,12 +184,19 @@ def sync_sprints(issue):
             closed = sprint.get('state') == 'closed'
             startDate = sprint.get('startDate')
             endDate = sprint.get('endDate')
-
+            
+            # set startDate if it is None
+            if startDate == None:
+                startDate = '1970-01-01T00:00:00.000+01:00'
+            
             startDateee = datetime.strptime(startDate[:10], "%Y-%m-%d")
-            endDateee = datetime.strptime(endDate[:10], "%Y-%m-%d")
 
-            if startDateee.date() >= endDateee.date():
-                endDate = startDateee + timedelta(days=1)
+            # set endDate
+            if endDate != None:
+                endDateee = datetime.strptime(endDate[:10], "%Y-%m-%d")
+
+                if startDateee.date() >= endDateee.date():
+                    endDate = startDateee + timedelta(days=1)
 
             for milestne in MILESTONES:
                 if milestone == milestne['title']:
@@ -270,7 +312,15 @@ def sync_comments_and_attachments(issue_id, gl_issue):
                 }
             )
 
-def close_issue(gl_issue, updated_at):
+def close_issue(gl_issue, issue):
+    is_closed = (issue['fields']['status']['name'] == "Abgeschlossen") or \
+                (issue['fields']['status']['name'] == "Fertig")
+
+    if is_closed == False:
+        return
+
+    updated_at = issue['fields']['updated']
+
     # update updated_at
     res = requests.put(
         GITLAB_URL + 'api/v4/projects/%s/issues/%s' % (GITLAB_PROJECT_ID , gl_issue),
@@ -281,6 +331,8 @@ def close_issue(gl_issue, updated_at):
             'state_event': 'close'
         }
     ).json()
+
+    print("issue #%s has been closed" % gl_issue)
 
 def set_updated_at(gl_issue, updated_at, created_at):
     # update updated_at
@@ -340,19 +392,25 @@ def create_issue(ticket_number, issue):
     )
 
     # returns 201 if issue was created
-    if response.status_code != 201:
+    if response.status_code == 201:
+        gl_issue = response.json()['iid']
+        print ("created issue #%s" % gl_issue)
+
+        close_issue(gl_issue, issue)
+
+        return gl_issue
+    else:
         # if http status = 409 there already exists an gitlab issue with this iid
         # skipping - only print response if there is an other http status
         if response.status_code != 409:
             raise Exception(response.json()['message'])
+
+        print ("issue #%s already exists" % ticket_number)
+
+        # try to close issue
+        close_issue(ticket_number, issue)
         return 0
 
-    gl_issue = response.json()['iid']
-
-    if issue['fields']['status']['statusCategory']['key'] == "done":
-        close_issue(gl_issue, issue['fields']['updated'])
-
-    return gl_issue
 
 # STEP 1: create ALL issues
 # STEP 2: create ALL comments
@@ -362,27 +420,17 @@ def create_issue(ticket_number, issue):
 def sync_issues():
     issues = []
 
-    for ticket_number in range(1, MAX_JIRA_TICKET_NUMBER + 1):
-        jira_key = JIRA_PROJECT + "-" + str(ticket_number)
-        
-        # fetch jira issue data with jiraKey
-        issue_response = fetch_issue_data(jira_key)
-
-        if issue_response.status_code == 404:
-            print('Issue %s-%s not found! Skipping issue id.' % (JIRA_PROJECT, ticket_number))
-            continue
-
-        issue = issue_response.json()
+    for jira_issue in jira_issues:
+        ticket_number = get_ticket_number(jira_issue)
 
         # create issue
-        gl_issue = create_issue(ticket_number, issue)
+        gl_issue = create_issue(ticket_number, jira_issue)
         if gl_issue <= 0:
             continue
 
         # add issue
-        issue['new_iid'] = gl_issue
-        issues.append(issue)
-        print ("created issue #%s" % gl_issue)
+        jira_issue['new_iid'] = gl_issue
+        issues.append(jira_issue)
 
     # sync all issues
     for issue in issues:
@@ -397,10 +445,51 @@ def sync_issues():
         set_updated_at(gl_issue, issue['fields']['updated'], issue['fields']['created'])
         print ("updated 'updated_at' for issue #%s" % gl_issue)
 
-fetch_project_data()
-users = fetch_users()
-sprints = fetch_sprints()
-MILESTONES = fetch_milestones()
+def list_users():
+    print("\tCopy following lines in the top of this sctipt:\n\n\tGITLAB_USER_NAMES = {")
+
+    for jira_user in jira_users:
+        print("\t\t'" + jira_user + "': '',")
+    
+    print("\t}")
+
+def main():
+    print("""
+    Press 1 to List all Users
+    Press 2 to start the sync
+    Press 9 to Exit
+""")
+
+    while(True):
+        selection = input("Select Operation [1, 2, 9]: ")
+        if(selection == '1'):
+            list_users()
+        elif(selection == '2'):
+            sync_issues()
+        elif(selection == '9'):
+            break
+        else:
+            print("Enter valid Operation!")
+
+print("""
+    Loading
+        - Jira Issues & Sprints
+        - Jira User Data
+        - Gitlab Milestones
+        - Gitlab User Data
+    
+    Please wait...
+""")
+
 MAX_JIRA_TICKET_NUMBER = fetch_latest_jira_ticket_number()
 
-sync_issues()
+fetch_project_data()
+jira_issues = fetch_jira_issues()
+
+sprints = fetch_jira_sprints()
+MILESTONES = fetch_gitlab_milestones()
+
+jira_users = get_jira_users_for_projekt()
+gitlab_users = fetch_gitlab_users()
+
+main()
